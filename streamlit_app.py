@@ -768,21 +768,13 @@ DATA["CP_A"] = DATA["CP_A"].astype(str).str.replace("CASERIO ","",regex=False)
 DATA["COD_A"] = DATA["COD_A"].apply(
     lambda x: str(int(float(x))) if pd.notna(x) and str(x).strip() not in ("","nan","None") else None)
 
-# ── Merge MINI — primeras 3 columnas de MCP_ORIGINAL (fiel al notebook) ──────
-# El notebook: MINI = MCP[[col0, col1, col2]].dropna().drop_duplicates()
-# Luego: DATA = DATA.merge(MINI, left_on=["UBI","MCP_A"], right_on=["UBI", col2])
-mcp_orig_cols = mcp_raw.columns.tolist()
-if len(mcp_orig_cols) >= 3:
-    c0, c1, c2 = mcp_orig_cols[0], mcp_orig_cols[1], mcp_orig_cols[2]
-    MINI = mcp_raw[[c0, c1, c2]].dropna().drop_duplicates().copy()
-    MINI[c0] = MINI[c0].astype(str).str.strip().apply(lambda x: fmt_int(x, 6))
-    # c1 = MCP_COD (9 dígitos), c2 = MCP (nombre)
-    MINI = MINI.rename(columns={c0: "UBI", c2: "_MCP_merge"})
-    if c1 == "MCP_COD":
-        MINI["MCP_COD"] = MINI["MCP_COD"].astype(str).str.replace(r"\.0$","",regex=True).apply(
-            lambda x: fmt_int(x, 9))
-    DATA = DATA.merge(MINI, left_on=["UBI","MCP_A"], right_on=["UBI","_MCP_merge"], how="left")
-    DATA = DATA.drop(columns=["_MCP_merge"], errors="ignore")
+# ── Merge MINI — copia exacta del notebook ───────────────────────────────────
+# MINI = MCP[[MCP.columns[0], MCP.columns[1], MCP.columns[2]]].dropna().drop_duplicates()
+# DATA = DATA.merge(MINI, left_on=["UBI", "MCP_A"], right_on=["UBI", "MCP"], how="left")
+# Funciona porque en este punto DATA ya no tiene columna "MCP" (renombrada a MCP_A).
+MCP = mcp_for_cod.copy()
+MINI = MCP[[MCP.columns[0], MCP.columns[1], MCP.columns[2]]].dropna().drop_duplicates()
+DATA = DATA.merge(MINI, left_on=["UBI", "MCP_A"], right_on=["UBI", "MCP"], how="left")
 
 if "MCP_COD" in DATA.columns:
     DATA["MCP_COD"] = DATA["MCP_COD"].astype(str).str.replace(r"\.0$","",regex=True).apply(
