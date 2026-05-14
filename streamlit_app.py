@@ -577,20 +577,96 @@ def to_excel_bytes(df):
     return buf.getvalue()
 
 
-def calcular_exactitud(df, col_auto, col_manual):
+# ═════════════════════════════════════════════════════════════════════════════
+# MÓDULO DE VALIDACIÓN — fiel al notebook VF
+# ═════════════════════════════════════════════════════════════════════════════
+
+def clasificar_exactitud_vf(row, col_autom, col_manual):
     """clasificar_exactitud del notebook VF."""
-    def _cl(row):
-        a, m = row[col_auto], row[col_manual]
-        if pd.notna(a) and pd.notna(m) and a == m:   return "c"
-        if a == "INDETERMINADA" and pd.notna(m):      return "fD"
-        if pd.notna(a) and pd.notna(m) and a != m:   return "f"
-        if pd.isna(a)  and pd.notna(m):               return "d"
-        if a == "INDETERMINADA" and pd.isna(m):       return "eD"
-        if pd.notna(a) and pd.isna(m):                return "e"
-        if pd.isna(a)  and pd.isna(m):                return "v"
-        return None
-    out = df.copy(); out["EXACTITUD"] = out.apply(_cl, axis=1)
-    return out
+    autom  = row[col_autom]
+    manual = row[col_manual]
+    if pd.notna(autom) and pd.notna(manual) and autom == manual:
+        return "c"
+    elif autom == "INDETERMINADA" and pd.notna(manual):
+        return "fD"
+    elif pd.notna(autom) and pd.notna(manual) and autom != manual:
+        return "f"
+    elif pd.isna(autom) and pd.notna(manual):
+        return "d"
+    elif autom == "INDETERMINADA" and pd.isna(manual):
+        return "eD"
+    elif pd.notna(autom) and pd.isna(manual):
+        return "e"
+    elif pd.isna(autom) and pd.isna(manual):
+        return "v"
+    return None
+
+
+def construir_mcps_detect(data_final):
+    """
+    Replica la celda MCPS_DETECT del notebook VF:
+    - COD_A float → string sin decimales (ej. 50403.0 → "50403")
+    - Renombra CO_MCP → MCP_MANUAL  y  MCP_COD → MCP_AUTOM
+    - Limpia vacíos
+    """
+    df = data_final.copy()
+
+    # COD_A: float → str entero
+    if "COD_A" in df.columns:
+        df["COD_A"] = df["COD_A"].apply(
+            lambda x: str(int(x)) if pd.notna(x) and str(x).strip() not in ("", "nan") else None
+        )
+
+    return df
+
+
+def resumen_por_distrito(df, col_autom, col_manual):
+    df2 = df.copy()
+    df2["UBI"] = df2["UBI"].astype(str).str.strip().apply(
+        lambda x: f"{int(float(x)):06d}" if x not in ("", "nan") else x
+    )
+    res = (
+        df2.groupby("UBI")
+        .agg(
+            TOTAL     = ("UBI",      "count"),
+            MANUAL    = (col_manual, lambda x: x.notna().sum()),
+            AUTOM     = (col_autom,  lambda x: x.notna().sum()),
+            CORRECTOS = ("EXACTITUD", lambda x: (x == "c").sum()),
+        )
+        .reset_index()
+    )
+    res["DETECTADO"]      = (res["CORRECTOS"] / res["MANUAL"]  * 100).round(2)
+    res["CORRECTAMENTE_D"] = (res["CORRECTOS"] / res["AUTOM"]   * 100).round(2)
+    return res
+
+
+def resumen_por_mcp(df, col_autom, col_manual):
+    res = (
+        df.groupby(col_manual)
+        .agg(
+            TOTAL     = (col_manual, "count"),
+            MANUAL    = (col_manual, lambda x: x.notna().sum()),
+            AUTOM     = (col_autom,  lambda x: x.notna().sum()),
+            CORRECTOS = ("EXACTITUD", lambda x: (x == "c").sum()),
+        )
+        .reset_index()
+    )
+    res["DETECTADO"]       = (res["CORRECTOS"] / res["MANUAL"] * 100).round(2)
+    res["CORRECTAMENTE_D"] = (res["CORRECTOS"] / res["AUTOM"]  * 100).round(2)
+    return res
+
+
+def resumen_por_metodo(df):
+    res = (
+        df.groupby(["metodo_CP", "EXACTITUD"])
+        .size()
+        .reset_index(name="n")
+        .pivot(index="metodo_CP", columns="EXACTITUD", values="n")
+        .fillna(0)
+        .reset_index()
+    )
+    res.columns.name = None
+    return res
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -646,7 +722,10 @@ with st.sidebar:
     st.markdown("**Módulo de validación** *(opcional)*")
     val_file = st.file_uploader(
         "Revisión manual (.xlsx)", type=["xlsx","xls"],
-        help="Excel con MCP asignada manualmente para calcular indicadores de exactitud."
+        help=(
+            "Excel con la columna CO_MCP (asignación manual) para calcular "
+            "indicadores de exactitud. Se cruza con MCP_COD (automático) del resultado."
+        )
     )
 
     st.markdown("---")
@@ -737,8 +816,7 @@ DATA_B = preparar_padron(padron_raw, col_ubi, col_dom, ubis_filtro=ubis_filtro)
 if DATA_B.empty:
     st.error("No quedaron registros tras aplicar el filtro de ubigeo."); st.stop()
 
-# Filtrar MCP con los mismos ubigeos — igual que notebook:
-# MCP_B = MCP_B[MCP_B["UBI"].isin([...])]
+# Filtrar MCP con los mismos ubigeos
 if ubis_filtro:
     unorms = [fmt_int(u, 6) for u in ubis_filtro]
     unorms = [u for u in unorms if u]
@@ -838,41 +916,151 @@ for col in ["CP","MCP","metodo_CP"]:
 DATA_FINAL = enriquecer_con_cod(DATA_FINAL, mcp_filt)
 t_total = (time.time() - t0) / 60
 
-# ── Módulo de validación ──────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# MÓDULO DE VALIDACIÓN — fiel al notebook VF
+# ═════════════════════════════════════════════════════════════════════════════
 
 if val_file:
-    st.markdown("---"); st.markdown("### 🔍 Módulo de Validación")
+    st.markdown("---")
+    st.markdown("### 🔍 Módulo de Validación")
+
     try:
         val_df = pd.read_excel(val_file, dtype=str)
-        vc1, vc2, vc3 = st.columns(3)
-        with vc1: col_manual  = st.selectbox("Columna MCP manual:", val_df.columns.tolist())
-        with vc2: col_key_val = st.selectbox("Columna clave en revisión:", val_df.columns.tolist())
-        with vc3: col_key_res = st.selectbox(
-            "Columna clave en resultado:", DATA_FINAL.columns.tolist(),
-            index=list(DATA_FINAL.columns).index("ID") if "ID" in DATA_FINAL.columns else 0)
 
-        DATA_FINAL = DATA_FINAL.merge(
-            val_df[[col_key_val, col_manual]].rename(
-                columns={col_key_val: col_key_res, col_manual: "MCP_MANUAL"}),
-            on=col_key_res, how="left")
-        col_autom = "MCP_A" if "MCP_A" in DATA_FINAL.columns else "MCP"
-        DATA_FINAL = calcular_exactitud(DATA_FINAL, col_autom, "MCP_MANUAL")
+        # ── Selección de columnas del archivo de revisión ──────────────────────
+        st.markdown("**Mapeo de columnas del archivo de revisión manual**")
+        vc1, vc2 = st.columns(2)
+        with vc1:
+            col_manual_src = st.selectbox(
+                "Columna con MCP asignada manualmente (CO_MCP):",
+                val_df.columns.tolist(),
+                index=val_df.columns.tolist().index("CO_MCP")
+                      if "CO_MCP" in val_df.columns else 0,
+            )
+        with vc2:
+            col_key_val = st.selectbox(
+                "Columna clave para cruzar con el resultado:",
+                val_df.columns.tolist(),
+                index=val_df.columns.tolist().index("ID")
+                      if "ID" in val_df.columns else 0,
+            )
 
-        i1 = DATA_FINAL["MCP_MANUAL"].notna().mean() * 100
-        i2 = DATA_FINAL[col_autom].notna().mean() * 100
-        vi1, vi2 = st.columns(2)
-        vi1.metric("Clasificado manualmente", f"{i1:.1f}%")
-        vi2.metric("Clasificado automáticamente", f"{i2:.1f}%")
+        col_key_res = "ID"  # siempre cruzamos por ID (generado en preparar_padron)
 
-        cnt = DATA_FINAL["EXACTITUD"].value_counts()
-        pct = DATA_FINAL["EXACTITUD"].value_counts(normalize=True) * 100
-        labs = {"c":"✅ Correctos","f":"❌ Fallos","fD":"⚠️ Fallos indet.",
-                "e":"➕ Excesos","eD":"➕ Excesos indet.","d":"➖ Déficits","v":"⬜ Vacíos correctos"}
-        rows_v = [{"Indicador": lbl, "N": int(cnt[k]), "%": f"{pct[k]:.2f}%"}
-                  for k, lbl in labs.items() if k in cnt]
-        st.dataframe(pd.DataFrame(rows_v), use_container_width=True, hide_index=True)
+        # ── Merge: pegar MCP_MANUAL al DATA_FINAL ─────────────────────────────
+        val_merge = (
+            val_df[[col_key_val, col_manual_src]]
+            .rename(columns={col_key_val: col_key_res, col_manual_src: "MCP_MANUAL"})
+            .copy()
+        )
+        # Alinear tipos del ID
+        val_merge[col_key_res] = val_merge[col_key_res].apply(
+            lambda x: fmt_int(x, 0) if pd.notna(x) else None
+        )
+        DATA_FINAL[col_key_res] = DATA_FINAL[col_key_res].astype(str)
+
+        MCPS_DETECT = DATA_FINAL.merge(val_merge, on=col_key_res, how="left")
+
+        # ── Construcción de MCPS_DETECT fiel al notebook ──────────────────────
+        MCPS_DETECT = construir_mcps_detect(MCPS_DETECT)
+
+        # MCP_AUTOM = MCP_COD (columna del catálogo enriquecido)
+        col_autom = "MCP_COD" if "MCP_COD" in MCPS_DETECT.columns else "MCP_A"
+        MCPS_DETECT = MCPS_DETECT.rename(columns={col_autom: "MCP_AUTOM"})
+
+        # Limpiar vacíos (replace "" → None)
+        MCPS_DETECT["MCP_MANUAL"] = MCPS_DETECT["MCP_MANUAL"].replace("", None)
+        MCPS_DETECT["MCP_AUTOM"]  = MCPS_DETECT["MCP_AUTOM"].replace("", None)
+
+        # ── Clasificar exactitud ───────────────────────────────────────────────
+        MCPS_DETECT["EXACTITUD"] = MCPS_DETECT.apply(
+            clasificar_exactitud_vf, axis=1,
+            col_autom="MCP_AUTOM", col_manual="MCP_MANUAL"
+        )
+
+        # ── Diagnóstico rápido ─────────────────────────────────────────────────
+        n_manual = int(MCPS_DETECT["MCP_MANUAL"].notna().sum())
+        n_autom  = int(MCPS_DETECT["MCP_AUTOM"].notna().sum())
+        total_v  = len(MCPS_DETECT)
+
+        ind1 = n_manual / total_v * 100 if total_v else 0
+        ind2 = n_autom  / total_v * 100 if total_v else 0
+
+        di1, di2 = st.columns(2)
+        di1.metric("Clasificado manualmente",      f"{ind1:.2f}%", f"{n_manual:,} registros")
+        di2.metric("Clasificado automáticamente",  f"{ind2:.2f}%", f"{n_autom:,} registros")
+
+        # ── Tabla de exactitud global ──────────────────────────────────────────
+        conteos     = MCPS_DETECT["EXACTITUD"].value_counts()
+        porcentajes = MCPS_DETECT["EXACTITUD"].value_counts(normalize=True) * 100
+
+        LABS = {
+            "c":  "✅ Correctas llenas",
+            "f":  "❌ Fallos",
+            "fD": "⚠️  Fallos indet.",
+            "e":  "➕ Excesos",
+            "eD": "➕ Excesos indet.",
+            "d":  "➖ Déficits",
+            "v":  "⬜ Correctas vacías",
+        }
+        rows_ex = [
+            {
+                "Indicador": lbl,
+                "N": int(conteos.get(k, 0)),
+                "%": f"{porcentajes.get(k, 0):.2f}%",
+            }
+            for k, lbl in LABS.items()
+        ]
+        st.markdown("#### Exactitud global")
+        st.dataframe(pd.DataFrame(rows_ex), use_container_width=True, hide_index=True)
+
+        # ── Resúmenes desagregados ─────────────────────────────────────────────
+        tab_dist, tab_mcp, tab_met = st.tabs(
+            ["📍 Por distrito", "🏘️ Por MCP manual", "⚙️ Por método"]
+        )
+
+        with tab_dist:
+            st.caption("Resumen por UBIGEO — fiel al notebook (RES_DIST)")
+            rd = resumen_por_distrito(MCPS_DETECT, "MCP_AUTOM", "MCP_MANUAL")
+            st.dataframe(rd, use_container_width=True, hide_index=True)
+            st.download_button(
+                "📥 Descargar RES_DIST (.xlsx)",
+                data=to_excel_bytes(rd),
+                file_name="RES_DIST.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+        with tab_mcp:
+            st.caption("Resumen por MCP manual — fiel al notebook (RES_MCP)")
+            rm = resumen_por_mcp(MCPS_DETECT, "MCP_AUTOM", "MCP_MANUAL")
+            st.dataframe(rm, use_container_width=True, hide_index=True)
+            st.download_button(
+                "📥 Descargar RES_MCP (.xlsx)",
+                data=to_excel_bytes(rm),
+                file_name="RES_MCP.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+        with tab_met:
+            st.caption("Resumen por método — fiel al notebook (RES_METODO)")
+            if "metodo_CP" in MCPS_DETECT.columns:
+                rm2 = resumen_por_metodo(MCPS_DETECT)
+                st.dataframe(rm2, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "📥 Descargar RES_METODO (.xlsx)",
+                    data=to_excel_bytes(rm2),
+                    file_name="RES_METODO.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.info("No se encontró la columna `metodo_CP` en el resultado.")
+
+        # ── Agregar EXACTITUD al DATA_FINAL para la descarga ──────────────────
+        DATA_FINAL = MCPS_DETECT.copy()
+
     except Exception as e:
         st.error(f"Error en módulo de validación: {e}")
+        import traceback; st.code(traceback.format_exc())
 
 # ── Resultados ────────────────────────────────────────────────────────────────
 
@@ -925,22 +1113,24 @@ if fe == "Asignados"   and "CP_A" in dv.columns: dv = dv[dv["CP_A"].notna()]
 if fe == "Sin asignar" and "CP_A" in dv.columns: dv = dv[dv["CP_A"].isna()]
 
 COLS = ["ID","UBI","DOM2024","CP_A","MCP_A","COD_A","metodo_CP"]
-if "MCP_COD"    in dv.columns: COLS.append("MCP_COD")
-if "EXACTITUD"  in dv.columns: COLS.append("EXACTITUD")
+if "MCP_AUTOM"  in dv.columns: COLS.append("MCP_AUTOM")
 if "MCP_MANUAL" in dv.columns: COLS.append("MCP_MANUAL")
+if "EXACTITUD"  in dv.columns: COLS.append("EXACTITUD")
 cols_ok = [c for c in COLS if c in dv.columns]
 
 st.caption(f"Mostrando **{len(dv):,}** registros de **{total:,}**")
 st.dataframe(dv[cols_ok].reset_index(drop=True), use_container_width=True, height=420,
     column_config={
-        "ID":        st.column_config.NumberColumn("ID", width="small"),
-        "UBI":       st.column_config.TextColumn("UBIGEO", width="small"),
-        "DOM2024":   st.column_config.TextColumn("DIRECCIÓN", width="large"),
-        "CP_A":      st.column_config.TextColumn("CP asignado"),
-        "MCP_A":     st.column_config.TextColumn("MCP asignada"),
-        "COD_A":     st.column_config.TextColumn("COD", width="small"),
-        "metodo_CP": st.column_config.TextColumn("Método", width="small"),
-        "EXACTITUD": st.column_config.TextColumn("Exactitud", width="small"),
+        "ID":         st.column_config.NumberColumn("ID", width="small"),
+        "UBI":        st.column_config.TextColumn("UBIGEO", width="small"),
+        "DOM2024":    st.column_config.TextColumn("DIRECCIÓN", width="large"),
+        "CP_A":       st.column_config.TextColumn("CP asignado"),
+        "MCP_A":      st.column_config.TextColumn("MCP asignada"),
+        "COD_A":      st.column_config.TextColumn("COD", width="small"),
+        "metodo_CP":  st.column_config.TextColumn("Método", width="small"),
+        "MCP_AUTOM":  st.column_config.TextColumn("MCP automático"),
+        "MCP_MANUAL": st.column_config.TextColumn("MCP manual"),
+        "EXACTITUD":  st.column_config.TextColumn("Exactitud", width="small"),
     })
 
 # ── Descargas ─────────────────────────────────────────────────────────────────
