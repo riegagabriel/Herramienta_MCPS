@@ -2,17 +2,45 @@
 BASILISCO — Aplicación Streamlit
 Traducción fiel de BASILISCO_MINI_VF.ipynb
 3 corridas: C1 (1–7), C2 (11–17), C3 (21–32)
+
+Optimizaciones:
+  - rapidfuzz.distance.Levenshtein en lugar de Python puro (~10-20x más rápido)
+  - concurrent.futures.ThreadPoolExecutor para paralelizar las corridas
+  - st.session_state para guardar resultados → los filtros no re-ejecutan el motor
 """
 
 import io
 import re
 import time
 import warnings
+import concurrent.futures
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+# rapidfuzz es lo que usa el notebook original (rapidfuzz.distance.Levenshtein)
+try:
+    from rapidfuzz.distance import Levenshtein as _RFL
+    def lev(s1: str, s2: str) -> int:
+        return _RFL.distance(s1, s2)
+except ImportError:
+    # fallback Python puro si no está instalado
+    def lev(s1: str, s2: str) -> int:
+        if s1 == s2: return 0
+        l1, l2 = len(s1), len(s2)
+        if l1 == 0: return l2
+        if l2 == 0: return l1
+        if l1 < l2: s1, s2, l1, l2 = s2, s1, l2, l1
+        prev = list(range(l2 + 1))
+        for i in range(1, l1 + 1):
+            curr = [i] + [0] * l2
+            for j in range(1, l2 + 1):
+                cost = 0 if s1[i-1] == s2[j-1] else 1
+                curr[j] = min(curr[j-1]+1, prev[j]+1, prev[j-1]+cost)
+            prev = curr
+        return prev[l2]
 
 warnings.filterwarnings("ignore")
 
@@ -29,43 +57,34 @@ st.set_page_config(
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600;700&display=swap');
-
 html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .main { background-color: #0f1117; }
 .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
-
-.bheader {
-    background: linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%);
-    border: 1px solid #2d3748; border-left: 4px solid #38b2ac;
-    border-radius: 8px; padding: 1.5rem 2rem; margin-bottom: 1.5rem;
-}
-.bheader h1 { font-family: 'IBM Plex Mono', monospace; color: #38b2ac;
-    font-size: 2rem; margin: 0; letter-spacing: 0.05em; }
-.bheader p { color: #718096; margin: 0.3rem 0 0; font-size: 0.9rem; }
-
-.mcard { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 8px;
-    padding: 1rem 1.2rem; text-align: center; }
-.mcard .val { font-family: 'IBM Plex Mono', monospace; font-size: 1.8rem;
-    font-weight: 600; color: #38b2ac; }
-.mcard .lbl { color: #718096; font-size: 0.78rem; text-transform: uppercase;
-    letter-spacing: 0.08em; margin-top: 0.2rem; }
-
-.cbadge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px;
-    font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; font-weight: 600; }
+.bheader { background: linear-gradient(135deg,#1a1f2e 0%,#0d1117 100%);
+    border:1px solid #2d3748; border-left:4px solid #38b2ac;
+    border-radius:8px; padding:1.5rem 2rem; margin-bottom:1.5rem; }
+.bheader h1 { font-family:'IBM Plex Mono',monospace; color:#38b2ac;
+    font-size:2rem; margin:0; letter-spacing:0.05em; }
+.bheader p { color:#718096; margin:0.3rem 0 0; font-size:0.9rem; }
+.mcard { background:#1a1f2e; border:1px solid #2d3748; border-radius:8px;
+    padding:1rem 1.2rem; text-align:center; }
+.mcard .val { font-family:'IBM Plex Mono',monospace; font-size:1.8rem;
+    font-weight:600; color:#38b2ac; }
+.mcard .lbl { color:#718096; font-size:0.78rem; text-transform:uppercase;
+    letter-spacing:0.08em; margin-top:0.2rem; }
+.cbadge { display:inline-block; padding:0.2rem 0.6rem; border-radius:4px;
+    font-family:'IBM Plex Mono',monospace; font-size:0.75rem; font-weight:600; }
 .c1 { background:#1a365d; color:#90cdf4; border:1px solid #2b6cb0; }
 .c2 { background:#1a3a2a; color:#9ae6b4; border:1px solid #276749; }
 .c3 { background:#3d2b00; color:#f6ad55; border:1px solid #c05621; }
-
-.step-hdr { font-family: 'IBM Plex Mono', monospace; color: #38b2ac;
-    font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.1em;
-    border-bottom: 1px solid #2d3748; padding-bottom: 0.5rem; margin-bottom: 1rem; }
-
+.step-hdr { font-family:'IBM Plex Mono',monospace; color:#38b2ac;
+    font-size:0.85rem; text-transform:uppercase; letter-spacing:0.1em;
+    border-bottom:1px solid #2d3748; padding-bottom:0.5rem; margin-bottom:1rem; }
 .ibox { background:#1a2744; border:1px solid #2b6cb0; border-radius:6px;
     padding:0.8rem 1rem; color:#90cdf4; font-size:0.85rem; margin-bottom:1rem; }
 .sbox { background:#1a3a2a; border:1px solid #276749; border-radius:6px;
     padding:0.8rem 1rem; color:#9ae6b4; font-size:0.85rem; margin-bottom:1rem; }
-
-.stProgress > div > div > div { background-color: #38b2ac; }
+.stProgress > div > div > div { background-color:#38b2ac; }
 .stButton > button { background:#38b2ac; color:#0f1117; font-weight:700;
     border:none; border-radius:6px; padding:0.6rem 2rem;
     font-family:'IBM Plex Mono',monospace; font-size:0.9rem;
@@ -77,7 +96,7 @@ section[data-testid="stSidebar"] { background:#0d1117; border-right:1px solid #2
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# MOTOR — traducción exacta del notebook VF
+# MOTOR
 # ═════════════════════════════════════════════════════════════════════════════
 
 def fmt_int(x, n):
@@ -89,29 +108,12 @@ def fmt_int(x, n):
         return None
 
 
-# ── Levenshtein puro Python (sin rapidfuzz) ───────────────────────────────────
-def lev(s1: str, s2: str) -> int:
-    if s1 == s2: return 0
-    l1, l2 = len(s1), len(s2)
-    if l1 == 0: return l2
-    if l2 == 0: return l1
-    if l1 < l2: s1, s2, l1, l2 = s2, s1, l2, l1
-    prev = list(range(l2 + 1))
-    for i in range(1, l1 + 1):
-        curr = [i] + [0] * l2
-        for j in range(1, l2 + 1):
-            cost = 0 if s1[i-1] == s2[j-1] else 1
-            curr[j] = min(curr[j-1]+1, prev[j]+1, prev[j-1]+cost)
-        prev = curr
-    return prev[l2]
-
-
 # ── Normalización ─────────────────────────────────────────────────────────────
 
 _R0 = {
     "Á":"A","É":"E","Í":"I","Ó":"O","Ú":"U",
     "Ñ":"N","W":"HU","S/T":"SECTOR",
-    "AV. SN":"AVENIDA SIN NOMBRE","VIVIENDAS":"VIVIENDA"
+    "AV. SN":"AVENIDA SIN NOMBRE","VIVIENDAS":"VIVIENDA",
 }
 _R2_BASE = {
     " DE ":" DEL "," 1ERO ":" 01 "," 1RO ":" 01 "," SR ":" SENOR ",
@@ -204,27 +206,23 @@ def norm_c1(t): return _norm(t, _PAT_C1)
 def norm_c2(t): return _norm(t, _PAT_C2, extra=_R2_C2_EXTRA)
 
 
-# ── Preparar MCP (fiel al notebook) ──────────────────────────────────────────
+# ── Preparar MCP ──────────────────────────────────────────────────────────────
 
 def preparar_mcp(mcp_raw, norm_fn, quitar_caserio=False, vias_sinteticas=False):
     m = mcp_raw.copy()
     m["UBI"] = m["UBI"].astype(str).str.strip().apply(lambda x: fmt_int(x, 6))
     m["POB"] = pd.to_numeric(m["POB"] if "POB" in m.columns else 0, errors="coerce").fillna(0)
-
     if "VIAS" not in m.columns: m["VIAS"] = ""
     m["VIAS"] = m["VIAS"].fillna("")
-
     if "MCP_COD" in m.columns:
         m["MCP_COD"] = m["MCP_COD"].astype(str).str.replace(r"\.0$","",regex=True).apply(
             lambda x: fmt_int(x, 9))
     if "COD" in m.columns:
         m["COD"] = m["COD"].astype(str).str.replace(r"\.0$","",regex=True)
-
     if quitar_caserio:
         m["CP"] = m["CP"].astype(str).str.replace("CASERIO","",regex=False).str.strip()
     if vias_sinteticas:
         m["VIAS"] = "AVENIDA " + m["CP"].astype(str)
-
     m["MCP_normalizado"]     = m["MCP"].apply(norm_fn)
     m["MCP_normalizado_se"]  = m["MCP_normalizado"].str.replace(" ","",regex=False)
     m["CP_normalizado"]      = m["CP"].apply(norm_fn)
@@ -235,18 +233,16 @@ def preparar_mcp(mcp_raw, norm_fn, quitar_caserio=False, vias_sinteticas=False):
     m["VIAS_normalizado"]    = m["VIAS_normalizado"].apply(
         lambda x: " ".join(dict.fromkeys(x.split())) if pd.notna(x) else x)
     m["VIAS_normalizado_se"] = m["VIAS_normalizado"].str.replace(" ","",regex=False)
-
     m.loc[m["CP_normalizado"]=="",   ["CP_normalizado","CP_normalizado_se"]]    = None
     m["CP_normalizado"]    = m["CP_normalizado"].fillna("CPQUEDOVACIO")
     m["CP_normalizado_se"] = m["CP_normalizado_se"].fillna("CPQUEDOVACIO")
     m.loc[m["VIAS_normalizado"]=="", ["VIAS_normalizado","VIAS_normalizado_se"]] = None
     m["VIAS_normalizado"]    = m["VIAS_normalizado"].fillna("NOTIENEVIASCONOCIDAS")
     m["VIAS_normalizado_se"] = m["VIAS_normalizado_se"].fillna("NOTIENEVIASCONOCIDAS")
-
     return m, {k: v.reset_index(drop=True) for k, v in m.groupby("UBI")}
 
 
-# ── Función de extracción genérica ────────────────────────────────────────────
+# ── Extracción ────────────────────────────────────────────────────────────────
 
 def _resolver_interna(ci, num):
     if len(ci) == 0: return None
@@ -305,8 +301,10 @@ def extraer_cp_mcp(dom_n, dom_nse, ubi, mcp_dict, metodos):
             _, min_len, dl, num = m
             cands = sub[sub["CP_normalizado"].str.len().fillna(0) >= min_len].copy()
             if len(cands) == 0: continue
-            cands["_d"] = cands["CP_normalizado_se"].apply(
-                lambda x: lev(dom_nse, x) if pd.notna(x) else 9999)
+            # rapidfuzz vectorizado: calcular todas las distancias de golpe
+            vals = cands["CP_normalizado_se"].tolist()
+            dists = [lev(dom_nse, x) if pd.notna(x) else 9999 for x in vals]
+            cands = cands.copy(); cands["_d"] = dists
             hits = cands[cands["_d"] <= dl]
             if len(hits) == 0: continue
             if len(hits) == 1:
@@ -357,8 +355,9 @@ def extraer_cp_mcp(dom_n, dom_nse, ubi, mcp_dict, metodos):
             if not dom_n: continue
             cands = sub[sub["VIAS_normalizado"].str.len().fillna(0) >= min_len].copy()
             if len(cands) == 0: continue
-            cands["_d"] = cands["VIAS_normalizado"].apply(
-                lambda x: lev(dom_n, x) if pd.notna(x) else 9999)
+            vals = cands["VIAS_normalizado"].tolist()
+            dists = [lev(dom_n, x) if pd.notna(x) else 9999 for x in vals]
+            cands = cands.copy(); cands["_d"] = dists
             hits = cands[cands["_d"] <= dl]
             if len(hits) == 0: continue
             if len(hits) == 1:
@@ -376,58 +375,72 @@ def extraer_cp_mcp(dom_n, dom_nse, ubi, mcp_dict, metodos):
     return (None, None, "")
 
 
-# ── Definición de métodos por corrida ─────────────────────────────────────────
-
 METODOS_C1 = [
-    ("exacta_c",  "1"),
-    ("exacta_se", "2"),
-    ("lev_cp", 16, 1, "3"),
-    ("lev_cp", 12, 1, "4"),
-    ("lev_cp", 20, 2, "5"),
-    ("lev_cp", 16, 2, "6"),
+    ("exacta_c",  "1"),  ("exacta_se", "2"),
+    ("lev_cp", 16, 1, "3"), ("lev_cp", 12, 1, "4"),
+    ("lev_cp", 20, 2, "5"), ("lev_cp", 16, 2, "6"),
     ("sub_cp",  9, "7"),
 ]
-
 METODOS_C2 = [
-    ("exacta_c",  "11"),
-    ("exacta_se", "12"),
-    ("lev_cp", 16, 1, "13"),
-    ("lev_cp", 12, 1, "14"),
-    ("lev_cp", 20, 2, "15"),
-    ("lev_cp", 16, 2, "16"),
+    ("exacta_c",  "11"), ("exacta_se", "12"),
+    ("lev_cp", 16, 1, "13"), ("lev_cp", 12, 1, "14"),
+    ("lev_cp", 20, 2, "15"), ("lev_cp", 16, 2, "16"),
     ("sub_cp",  8, "17"),
 ]
-
 METODOS_C3 = [
-    ("exacta_c",  "21"),
-    ("exacta_se", "22"),
-    ("lev_cp",  9, 1, "23"),
-    ("lev_cp",  7, 1, "24"),
-    ("lev_cp", 11, 2, "25"),
-    ("lev_cp",  9, 2, "26"),
-    ("lev_cp",  9, 2, "27"),
-    ("lev_cp",  5, 1, "28"),
-    ("sub_vias_c",  "29"),
-    ("sub_vias_se", "30"),
+    ("exacta_c",  "21"), ("exacta_se", "22"),
+    ("lev_cp",  9, 1, "23"), ("lev_cp",  7, 1, "24"),
+    ("lev_cp", 11, 2, "25"), ("lev_cp",  9, 2, "26"),
+    ("lev_cp",  9, 2, "27"), ("lev_cp",  5, 1, "28"),
+    ("sub_vias_c",  "29"), ("sub_vias_se", "30"),
     ("lev_vias_c", 8, 2, "31"),
     ("sub_cp",   5, "32"),
 ]
 
 
-def ejecutar_corrida(data, mcp_dict, metodos, num, pb=None, txt=None):
+# ── Ejecución paralela por chunks ─────────────────────────────────────────────
+
+def _procesar_chunk(args):
+    """Función top-level para ThreadPoolExecutor."""
+    rows, mcp_dict, metodos = args
+    return [
+        extraer_cp_mcp(r["DOM2024_normalizado"], r["DOM2024_normalizado_se"],
+                       r["UBI"], mcp_dict, metodos)
+        for r in rows
+    ]
+
+
+def ejecutar_corrida(data, mcp_dict, metodos, num, pb=None, txt=None, n_workers=4):
+    """
+    Corre el motor en paralelo dividiendo data en chunks.
+    n_workers=4 es conservador para Streamlit Cloud (2 vCPU).
+    """
     total = len(data)
-    res = []
-    for i, (_, row) in enumerate(data.iterrows()):
-        cp, mcp, met = extraer_cp_mcp(
-            row.get("DOM2024_normalizado",""),
-            row.get("DOM2024_normalizado_se",""),
-            row["UBI"], mcp_dict, metodos)
-        res.append({"CP": cp, "MCP": mcp, "metodo_CP": met})
-        if pb and i % max(1, total//100) == 0:
-            pb.progress(min(i/total, 1.0))
-            if txt: txt.text(f"Corrida {num}: {i:,} / {total:,}…")
-    rdf = pd.DataFrame(res)
-    out = data.copy()
+    if total == 0:
+        out = data.copy()
+        out["CP"] = out["MCP"] = out["metodo_CP"] = None
+        return out
+
+    # Dividir en chunks del tamaño adecuado
+    chunk_size = max(1, total // n_workers)
+    records = data.to_dict("records")
+    chunks  = [records[i:i+chunk_size] for i in range(0, total, chunk_size)]
+
+    resultados = []
+    completados = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
+        futuros = {ex.submit(_procesar_chunk, (ch, mcp_dict, metodos)): len(ch) for ch in chunks}
+        for fut in concurrent.futures.as_completed(futuros):
+            resultados.extend(fut.result())
+            completados += futuros[fut]
+            if pb:
+                pb.progress(min(completados / total, 1.0))
+            if txt:
+                txt.text(f"Corrida {num}: {completados:,} / {total:,}…")
+
+    rdf = pd.DataFrame(resultados, columns=["CP","MCP","metodo_CP"])
+    out = data.copy().reset_index(drop=True)
     out["CP"]        = rdf["CP"].values
     out["MCP"]       = rdf["MCP"].values
     out["metodo_CP"] = rdf["metodo_CP"].values
@@ -446,13 +459,11 @@ def leer_archivo(file):
         file.seek(0)
         return pd.read_csv(file, sep=",", dtype=str, encoding="latin-1")
 
-
 def to_excel_bytes(df):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         df.to_excel(w, index=False, sheet_name="Resultados")
     return buf.getvalue()
-
 
 def detectar_columnas(df):
     cu = {c.upper().strip(): c for c in df.columns}
@@ -476,18 +487,15 @@ def detectar_columnas(df):
         if tc: dom = max(tc, key=lambda x: x[1])[0]
     return ubi, dom, comcp, dni
 
-
-# ── Exactitud (fiel al notebook) ──────────────────────────────────────────────
-
 def clasificar_exactitud(row):
     a, m = row["MCP_AUTOM"], row["MCP_MANUAL"]
-    if pd.notna(a) and pd.notna(m) and a == m:    return "c"
-    elif a == "INDETERMINADA" and pd.notna(m):     return "fD"
-    elif pd.notna(a) and pd.notna(m) and a != m:  return "f"
-    elif pd.isna(a)  and pd.notna(m):              return "d"
-    elif a == "INDETERMINADA" and pd.isna(m):      return "eD"
-    elif pd.notna(a) and pd.isna(m):               return "e"
-    elif pd.isna(a)  and pd.isna(m):               return "v"
+    if pd.notna(a) and pd.notna(m) and a == m:   return "c"
+    elif a == "INDETERMINADA" and pd.notna(m):    return "fD"
+    elif pd.notna(a) and pd.notna(m) and a != m: return "f"
+    elif pd.isna(a)  and pd.notna(m):             return "d"
+    elif a == "INDETERMINADA" and pd.isna(m):     return "eD"
+    elif pd.notna(a) and pd.isna(m):              return "e"
+    elif pd.isna(a)  and pd.isna(m):              return "v"
     return None
 
 
@@ -501,8 +509,6 @@ st.markdown("""
   <p>Motor de asignación de Centros Poblados · Padrón Electoral Peruano</p>
 </div>
 """, unsafe_allow_html=True)
-
-# ── MCP fijo ──────────────────────────────────────────────────────────────────
 
 MCP_PATH = Path(__file__).parent / "MCP_ORIGINAL.xlsx"
 
@@ -543,7 +549,8 @@ with st.sidebar:
     <b>Corridas:</b><br>
     🔵 C1 · métodos 1–7<br>
     🟢 C2 · métodos 11–17<br>
-    🟠 C3 · métodos 21–32
+    🟠 C3 · métodos 21–32<br><br>
+    <b>Motor:</b> rapidfuzz + paralelo
     </div>""", unsafe_allow_html=True)
 
 # ── Paso 1: subir padrón ──────────────────────────────────────────────────────
@@ -551,11 +558,13 @@ with st.sidebar:
 st.markdown('<div class="step-hdr">① Subir padrón</div>', unsafe_allow_html=True)
 
 padron_file = st.file_uploader(
-    "Archivo del padrón (.xlsx, .xls, .csv)",
-    type=["xlsx","xls","csv"]
+    "Archivo del padrón (.xlsx, .xls, .csv)", type=["xlsx","xls","csv"]
 )
 
 if padron_file is None:
+    # Limpiar resultado previo si cambia el archivo
+    for k in ["mcps_detect","mcp_filt","resumen_corridas","t_total"]:
+        st.session_state.pop(k, None)
     st.markdown('<div class="ibox">📂 Sube el archivo de padrón para continuar.</div>',
                 unsafe_allow_html=True)
     st.stop()
@@ -603,220 +612,215 @@ with st.expander("👁️ Vista previa — primeras 10 filas", expanded=False):
 
 st.markdown("---")
 run_btn = st.button("🚀  EJECUTAR BASILISCO", use_container_width=True)
-if not run_btn: st.stop()
 
-t0 = time.time()
+# ─────────────────────────────────────────────────────────────────────────────
+# BLOQUE DE EJECUCIÓN — solo corre cuando se pulsa el botón
+# Al terminar guarda todo en st.session_state
+# ─────────────────────────────────────────────────────────────────────────────
+if run_btn:
+    t0 = time.time()
 
-# ── Preparar DATA_B (fiel al notebook) ───────────────────────────────────────
+    ubis_filtro = [u.strip() for u in ubi_input.split(",") if u.strip()] if ubi_input.strip() else []
 
-ubis_filtro = [u.strip() for u in ubi_input.split(",") if u.strip()] if ubi_input.strip() else []
+    extra_cols = {}
+    if col_comcp != "(ninguna)": extra_cols[col_comcp] = "CO_MCP"
+    if col_dni   != "(ninguna)": extra_cols[col_dni]   = "DNI"
 
-extra_cols = {}
-if col_comcp != "(ninguna)": extra_cols[col_comcp] = "CO_MCP"
-if col_dni   != "(ninguna)": extra_cols[col_dni]   = "DNI"
+    keep = [col_ubi, col_dom] + [c for c in extra_cols if c in padron_raw.columns]
+    DATA_B = padron_raw[[c for c in keep if c in padron_raw.columns]].copy()
+    DATA_B = DATA_B.rename(columns={col_ubi: "UBI", col_dom: "DOM2024"})
+    for old, new in extra_cols.items():
+        if old in DATA_B.columns: DATA_B = DATA_B.rename(columns={old: new})
 
-keep = [col_ubi, col_dom] + [c for c in extra_cols if c in padron_raw.columns]
-DATA_B = padron_raw[[c for c in keep if c in padron_raw.columns]].copy()
-DATA_B = DATA_B.rename(columns={col_ubi: "UBI", col_dom: "DOM2024"})
-for old, new in extra_cols.items():
-    if old in DATA_B.columns: DATA_B = DATA_B.rename(columns={old: new})
+    DATA_B["UBI"] = DATA_B["UBI"].astype(str).str.strip().apply(lambda x: fmt_int(x, 6))
+    if "CO_MCP" in DATA_B.columns:
+        DATA_B["CO_MCP"] = DATA_B["CO_MCP"].astype(str).str.strip().apply(lambda x: fmt_int(x, 9))
+    if "DNI" in DATA_B.columns:
+        DATA_B["DNI"] = DATA_B["DNI"].astype(str).str.strip().apply(lambda x: fmt_int(x, 8))
+    DATA_B["DOM2024"] = DATA_B["DOM2024"].astype(str).str.strip()
+    DATA_B = DATA_B.dropna(subset=["UBI","DOM2024"])
+    DATA_B = DATA_B[DATA_B["DOM2024"].str.strip() != ""]
+    DATA_B["depto"] = DATA_B["UBI"].str[:2]
+    DATA_B["PROV"]  = DATA_B["UBI"].str[:4]
 
-DATA_B["UBI"] = DATA_B["UBI"].astype(str).str.strip().apply(lambda x: fmt_int(x, 6))
-if "CO_MCP" in DATA_B.columns:
-    DATA_B["CO_MCP"] = DATA_B["CO_MCP"].astype(str).str.strip().apply(lambda x: fmt_int(x, 9))
-if "DNI" in DATA_B.columns:
-    DATA_B["DNI"] = DATA_B["DNI"].astype(str).str.strip().apply(lambda x: fmt_int(x, 8))
-DATA_B["DOM2024"] = DATA_B["DOM2024"].astype(str).str.strip()
-DATA_B = DATA_B.dropna(subset=["UBI","DOM2024"])
-DATA_B = DATA_B[DATA_B["DOM2024"].str.strip() != ""]
+    if ubis_filtro:
+        unorms = [fmt_int(u,6) for u in ubis_filtro if fmt_int(u,6)]
+        if unorms: DATA_B = DATA_B[DATA_B["UBI"].isin(unorms)]
 
-DATA_B["depto"] = DATA_B["UBI"].str[:2]
-DATA_B["PROV"]  = DATA_B["UBI"].str[:4]
+    if DATA_B.empty:
+        st.error("Sin registros tras aplicar filtros."); st.stop()
 
-if ubis_filtro:
-    unorms = [fmt_int(u,6) for u in ubis_filtro if fmt_int(u,6)]
-    if unorms: DATA_B = DATA_B[DATA_B["UBI"].isin(unorms)]
+    if ubis_filtro:
+        unorms = [fmt_int(u,6) for u in ubis_filtro if fmt_int(u,6)]
+        mcp_filt = mcp_raw[mcp_raw["UBI"].isin(unorms)].copy() if unorms else mcp_raw.copy()
+        if mcp_filt.empty:
+            st.error(f"Sin entradas MCP para: {', '.join(unorms)}"); st.stop()
+    else:
+        mcp_filt = mcp_raw.copy()
 
-if DATA_B.empty:
-    st.error("Sin registros tras aplicar filtros."); st.stop()
+    DATA_B = DATA_B.reset_index(drop=True)
 
-if ubis_filtro:
-    unorms = [fmt_int(u,6) for u in ubis_filtro if fmt_int(u,6)]
-    mcp_filt = mcp_raw[mcp_raw["UBI"].isin(unorms)].copy() if unorms else mcp_raw.copy()
-    if mcp_filt.empty:
-        st.error(f"Sin entradas MCP para: {', '.join(unorms)}"); st.stop()
-else:
-    mcp_filt = mcp_raw.copy()
+    # Métricas de partida
+    st.markdown("---")
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.markdown(f'<div class="mcard"><div class="val">{len(DATA_B):,}</div><div class="lbl">Registros</div></div>', unsafe_allow_html=True)
+    mc2.markdown(f'<div class="mcard"><div class="val">{len(mcp_filt):,}</div><div class="lbl">Entradas MCP</div></div>', unsafe_allow_html=True)
+    mc3.markdown(f'<div class="mcard"><div class="val">{DATA_B["UBI"].nunique()}</div><div class="lbl">Distritos</div></div>', unsafe_allow_html=True)
+    st.markdown("---")
 
-DATA_B = DATA_B.reset_index(drop=True)
+    # ── CORRIDA 1 ────────────────────────────────────────────────────────────
+    st.markdown('<span class="cbadge c1">CORRIDA 1</span> &nbsp; Exacta + Levenshtein CP · métodos 1–7',
+                unsafe_allow_html=True)
+    pb1 = st.progress(0); t1 = st.empty()
 
-# Métricas
-st.markdown("---")
-mc1, mc2, mc3 = st.columns(3)
-mc1.markdown(f'<div class="mcard"><div class="val">{len(DATA_B):,}</div><div class="lbl">Registros</div></div>', unsafe_allow_html=True)
-mc2.markdown(f'<div class="mcard"><div class="val">{len(mcp_filt):,}</div><div class="lbl">Entradas MCP</div></div>', unsafe_allow_html=True)
-mc3.markdown(f'<div class="mcard"><div class="val">{DATA_B["UBI"].nunique()}</div><div class="lbl">Distritos</div></div>', unsafe_allow_html=True)
-st.markdown("---")
+    DATA_B["DOM2024_normalizado"]    = DATA_B["DOM2024"].apply(norm_c1)
+    DATA_B["DOM2024_normalizado_se"] = DATA_B["DOM2024_normalizado"].fillna("").str.replace(" ","",regex=False)
+    DATA_B.loc[DATA_B["DOM2024_normalizado"].isna()|(DATA_B["DOM2024_normalizado"]==""),
+               ["DOM2024_normalizado","DOM2024_normalizado_se"]] = None
+    DATA_B = DATA_B[DATA_B["DOM2024_normalizado"].notna()].reset_index(drop=True)
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-# CORRIDA 1                                                                   #
-# ═══════════════════════════════════════════════════════════════════════════ #
+    _, md1  = preparar_mcp(mcp_filt, norm_c1)
+    DATA_C1 = ejecutar_corrida(DATA_B, md1, METODOS_C1, 1, pb1, t1)
+    pb1.progress(1.0)
 
-st.markdown('<span class="cbadge c1">CORRIDA 1</span> &nbsp; Exacta + Levenshtein CP · métodos 1–7',
-            unsafe_allow_html=True)
-pb1 = st.progress(0); t1 = st.empty()
-
-DATA_B["DOM2024_normalizado"]    = DATA_B["DOM2024"].apply(norm_c1)
-DATA_B["DOM2024_normalizado_se"] = DATA_B["DOM2024_normalizado"].fillna("").str.replace(" ","",regex=False)
-DATA_B.loc[DATA_B["DOM2024_normalizado"].isna()|(DATA_B["DOM2024_normalizado"]==""),
-           ["DOM2024_normalizado","DOM2024_normalizado_se"]] = None
-DATA_B = DATA_B[DATA_B["DOM2024_normalizado"].notna()].reset_index(drop=True)
-
-_, md1   = preparar_mcp(mcp_filt, norm_c1)
-DATA_C1  = ejecutar_corrida(DATA_B, md1, METODOS_C1, 1, pb1, t1)
-pb1.progress(1.0)
-
-DATA1    = DATA_C1[DATA_C1["CP"].notna()].copy().reset_index(drop=True)
-DATA2_in = DATA_C1[DATA_C1["CP"].isna()].drop(
-    columns=["CP","MCP","metodo_CP","DOM2024_normalizado","DOM2024_normalizado_se"],
-    errors="ignore").reset_index(drop=True)
-t1.markdown(f'<div class="sbox">✅ C1 · <b>{len(DATA1):,}</b> asignados · <b>{len(DATA2_in):,}</b> pendientes</div>',
-            unsafe_allow_html=True)
-
-# ═══════════════════════════════════════════════════════════════════════════ #
-# CORRIDA 2                                                                   #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
-st.markdown('<span class="cbadge c2">CORRIDA 2</span> &nbsp; +BARRIO/SECTOR→CASERIO · métodos 11–17',
-            unsafe_allow_html=True)
-pb2 = st.progress(0); t2 = st.empty()
-
-if not DATA2_in.empty:
-    DATA2_in["DOM2024_normalizado"]    = DATA2_in["DOM2024"].apply(norm_c2)
-    DATA2_in["DOM2024_normalizado_se"] = DATA2_in["DOM2024_normalizado"].fillna("").str.replace(" ","",regex=False)
-    DATA2_in.loc[DATA2_in["DOM2024_normalizado"].isna()|(DATA2_in["DOM2024_normalizado"]==""),
-                 ["DOM2024_normalizado","DOM2024_normalizado_se"]] = None
-    DATA2_in = DATA2_in[DATA2_in["DOM2024_normalizado"].notna()].reset_index(drop=True)
-    _, md2   = preparar_mcp(mcp_filt, norm_c2)
-    DATA_C2  = ejecutar_corrida(DATA2_in, md2, METODOS_C2, 2, pb2, t2)
-    pb2.progress(1.0)
-    DATA2    = DATA_C2[DATA_C2["CP"].notna()].copy().reset_index(drop=True)
-    DATA3_in = DATA_C2[DATA_C2["CP"].isna()].drop(
+    DATA1    = DATA_C1[DATA_C1["CP"].notna()].copy().reset_index(drop=True)
+    DATA2_in = DATA_C1[DATA_C1["CP"].isna()].drop(
         columns=["CP","MCP","metodo_CP","DOM2024_normalizado","DOM2024_normalizado_se"],
         errors="ignore").reset_index(drop=True)
-    t2.markdown(f'<div class="sbox">✅ C2 · <b>{len(DATA2):,}</b> asignados · <b>{len(DATA3_in):,}</b> pendientes</div>',
+    t1.markdown(f'<div class="sbox">✅ C1 · <b>{len(DATA1):,}</b> asignados · <b>{len(DATA2_in):,}</b> pendientes</div>',
                 unsafe_allow_html=True)
-else:
-    DATA2 = DATA3_in = pd.DataFrame()
-    pb2.progress(1.0)
-    t2.markdown('<div class="ibox">⏭️ Sin pendientes para C2.</div>', unsafe_allow_html=True)
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-# CORRIDA 3                                                                   #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
-st.markdown('<span class="cbadge c3">CORRIDA 3</span> &nbsp; CP sin CASERIO + VIAS sintéticas · métodos 21–32',
-            unsafe_allow_html=True)
-pb3 = st.progress(0); t3 = st.empty()
-
-if not DATA3_in.empty:
-    DATA3_in["DOM2024_normalizado"]    = DATA3_in["DOM2024"].apply(norm_c2)
-    DATA3_in["DOM2024_normalizado_se"] = DATA3_in["DOM2024_normalizado"].fillna("").str.replace(" ","",regex=False)
-    DATA3_in.loc[DATA3_in["DOM2024_normalizado"].isna()|(DATA3_in["DOM2024_normalizado"]==""),
-                 ["DOM2024_normalizado","DOM2024_normalizado_se"]] = None
-    DATA3_in = DATA3_in[DATA3_in["DOM2024_normalizado"].notna()].reset_index(drop=True)
-    MCP_C3, md3 = preparar_mcp(mcp_filt, norm_c2, quitar_caserio=True, vias_sinteticas=True)
-    DATA_C3  = ejecutar_corrida(DATA3_in, md3, METODOS_C3, 3, pb3, t3)
-    pb3.progress(1.0)
-    DATA3_ok   = DATA_C3[DATA_C3["CP"].notna()].copy().reset_index(drop=True)
-    DATA3_nulo = DATA_C3[DATA_C3["CP"].isna()].copy().reset_index(drop=True)
-    t3.markdown(f'<div class="sbox">✅ C3 · <b>{len(DATA3_ok):,}</b> asignados · <b>{len(DATA3_nulo):,}</b> sin asignar</div>',
+    # ── CORRIDA 2 ────────────────────────────────────────────────────────────
+    st.markdown('<span class="cbadge c2">CORRIDA 2</span> &nbsp; +BARRIO/SECTOR→CASERIO · métodos 11–17',
                 unsafe_allow_html=True)
-else:
-    MCP_C3 = pd.DataFrame()
-    DATA3_ok = DATA3_nulo = pd.DataFrame()
-    pb3.progress(1.0)
-    t3.markdown('<div class="ibox">⏭️ Sin pendientes para C3.</div>', unsafe_allow_html=True)
+    pb2 = st.progress(0); t2 = st.empty()
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-# CONSOLIDAR — fiel al notebook: concat([DATA1, DATA2, DATA3])               #
-# ═══════════════════════════════════════════════════════════════════════════ #
+    if not DATA2_in.empty:
+        DATA2_in["DOM2024_normalizado"]    = DATA2_in["DOM2024"].apply(norm_c2)
+        DATA2_in["DOM2024_normalizado_se"] = DATA2_in["DOM2024_normalizado"].fillna("").str.replace(" ","",regex=False)
+        DATA2_in.loc[DATA2_in["DOM2024_normalizado"].isna()|(DATA2_in["DOM2024_normalizado"]==""),
+                     ["DOM2024_normalizado","DOM2024_normalizado_se"]] = None
+        DATA2_in = DATA2_in[DATA2_in["DOM2024_normalizado"].notna()].reset_index(drop=True)
+        _, md2   = preparar_mcp(mcp_filt, norm_c2)
+        DATA_C2  = ejecutar_corrida(DATA2_in, md2, METODOS_C2, 2, pb2, t2)
+        pb2.progress(1.0)
+        DATA2    = DATA_C2[DATA_C2["CP"].notna()].copy().reset_index(drop=True)
+        DATA3_in = DATA_C2[DATA_C2["CP"].isna()].drop(
+            columns=["CP","MCP","metodo_CP","DOM2024_normalizado","DOM2024_normalizado_se"],
+            errors="ignore").reset_index(drop=True)
+        t2.markdown(f'<div class="sbox">✅ C2 · <b>{len(DATA2):,}</b> asignados · <b>{len(DATA3_in):,}</b> pendientes</div>',
+                    unsafe_allow_html=True)
+    else:
+        DATA2 = DATA3_in = pd.DataFrame()
+        pb2.progress(1.0)
+        t2.markdown('<div class="ibox">⏭️ Sin pendientes para C2.</div>', unsafe_allow_html=True)
 
-DATA3 = pd.concat([df for df in [DATA3_ok, DATA3_nulo] if not df.empty], ignore_index=True) \
-        if (not DATA3_ok.empty or not DATA3_nulo.empty) else pd.DataFrame()
+    # ── CORRIDA 3 ────────────────────────────────────────────────────────────
+    st.markdown('<span class="cbadge c3">CORRIDA 3</span> &nbsp; CP sin CASERIO + VIAS sintéticas · métodos 21–32',
+                unsafe_allow_html=True)
+    pb3 = st.progress(0); t3 = st.empty()
 
-partes = [df for df in [DATA1, DATA2, DATA3] if not df.empty]
-DATA = pd.concat(partes, ignore_index=True) if partes else pd.DataFrame()
+    if not DATA3_in.empty:
+        DATA3_in["DOM2024_normalizado"]    = DATA3_in["DOM2024"].apply(norm_c2)
+        DATA3_in["DOM2024_normalizado_se"] = DATA3_in["DOM2024_normalizado"].fillna("").str.replace(" ","",regex=False)
+        DATA3_in.loc[DATA3_in["DOM2024_normalizado"].isna()|(DATA3_in["DOM2024_normalizado"]==""),
+                     ["DOM2024_normalizado","DOM2024_normalizado_se"]] = None
+        DATA3_in = DATA3_in[DATA3_in["DOM2024_normalizado"].notna()].reset_index(drop=True)
+        MCP_C3, md3 = preparar_mcp(mcp_filt, norm_c2, quitar_caserio=True, vias_sinteticas=True)
+        DATA_C3  = ejecutar_corrida(DATA3_in, md3, METODOS_C3, 3, pb3, t3)
+        pb3.progress(1.0)
+        DATA3_ok   = DATA_C3[DATA_C3["CP"].notna()].copy().reset_index(drop=True)
+        DATA3_nulo = DATA_C3[DATA_C3["CP"].isna()].copy().reset_index(drop=True)
+        t3.markdown(f'<div class="sbox">✅ C3 · <b>{len(DATA3_ok):,}</b> asignados · <b>{len(DATA3_nulo):,}</b> sin asignar</div>',
+                    unsafe_allow_html=True)
+    else:
+        MCP_C3 = pd.DataFrame()
+        DATA3_ok = DATA3_nulo = pd.DataFrame()
+        pb3.progress(1.0)
+        t3.markdown('<div class="ibox">⏭️ Sin pendientes para C3.</div>', unsafe_allow_html=True)
 
-for col in ["CP","MCP","metodo_CP"]:
-    if col in DATA.columns: DATA[col] = DATA[col].replace("", np.nan)
+    # ── Consolidar ────────────────────────────────────────────────────────────
+    DATA3 = pd.concat([df for df in [DATA3_ok, DATA3_nulo] if not df.empty], ignore_index=True) \
+            if (not DATA3_ok.empty or not DATA3_nulo.empty) else pd.DataFrame()
+    partes = [df for df in [DATA1, DATA2, DATA3] if not df.empty]
+    DATA = pd.concat(partes, ignore_index=True) if partes else pd.DataFrame()
 
-# ── Merge COD — fiel al notebook (usa MCP de la 3ª corrida = MCP_C3) ─────────
-# El notebook: MCPm = MCP[["UBI","COD","MCP","CP"]].drop_duplicates()...
-# MCP en ese punto es el MCP de la corrida 3 (con quitar_caserio y vias sinteticas)
-mcp_for_cod = MCP_C3 if not MCP_C3.empty else mcp_filt
+    for col in ["CP","MCP","metodo_CP"]:
+        if col in DATA.columns: DATA[col] = DATA[col].replace("", np.nan)
 
-MCPm = (mcp_for_cod[["UBI","COD","MCP","CP"]].drop_duplicates()
-        .groupby(["UBI","MCP","CP"], as_index=False).first())
-MCPm["UBI"] = MCPm["UBI"].astype(str).str.strip().apply(lambda x: fmt_int(x, 6))
-DATA = DATA.merge(MCPm, on=["UBI","MCP","CP"], how="left")
+    # ── Merge COD ─────────────────────────────────────────────────────────────
+    mcp_for_cod = MCP_C3 if not MCP_C3.empty else mcp_filt
+    MCPm = (mcp_for_cod[["UBI","COD","MCP","CP"]].drop_duplicates()
+            .groupby(["UBI","MCP","CP"], as_index=False).first())
+    MCPm["UBI"] = MCPm["UBI"].astype(str).str.strip().apply(lambda x: fmt_int(x, 6))
+    DATA = DATA.merge(MCPm, on=["UBI","MCP","CP"], how="left")
+    DATA = DATA.rename(columns={"CP":"CP_A","MCP":"MCP_A","COD":"COD_A"})
+    DATA["CP_A"] = DATA["CP_A"].astype(str).str.replace("CASERIO ","",regex=False)
+    DATA["COD_A"] = DATA["COD_A"].apply(
+        lambda x: str(int(float(x))) if pd.notna(x) and str(x).strip() not in ("","nan","None") else None)
 
-DATA = DATA.rename(columns={"CP":"CP_A","MCP":"MCP_A","COD":"COD_A"})
-DATA["CP_A"] = DATA["CP_A"].astype(str).str.replace("CASERIO ","",regex=False)
+    # ── Merge MINI (copia exacta del notebook) ────────────────────────────────
+    MCP = mcp_for_cod.copy()
+    MINI = MCP[[MCP.columns[0], MCP.columns[1], MCP.columns[2]]].dropna().drop_duplicates()
+    DATA = DATA.merge(MINI, left_on=["UBI","MCP_A"], right_on=["UBI","MCP"], how="left")
+    if "MCP_COD" in DATA.columns:
+        DATA["MCP_COD"] = DATA["MCP_COD"].astype(str).str.replace(r"\.0$","",regex=True).apply(
+            lambda x: fmt_int(x, 9) if x not in ("None","nan","") else None)
 
-# COD_A: float → str entero (50403.0 → "50403")
-DATA["COD_A"] = DATA["COD_A"].apply(
-    lambda x: str(int(float(x))) if pd.notna(x) and str(x).strip() not in ("","nan","None") else None)
+    t_total = (time.time() - t0) / 60
 
-# ── Merge MINI — copia exacta del notebook ───────────────────────────────────
-# MINI = MCP[[MCP.columns[0], MCP.columns[1], MCP.columns[2]]].dropna().drop_duplicates()
-# DATA = DATA.merge(MINI, left_on=["UBI", "MCP_A"], right_on=["UBI", "MCP"], how="left")
-# Funciona porque en este punto DATA ya no tiene columna "MCP" (renombrada a MCP_A).
-MCP = mcp_for_cod.copy()
-MINI = MCP[[MCP.columns[0], MCP.columns[1], MCP.columns[2]]].dropna().drop_duplicates()
-DATA = DATA.merge(MINI, left_on=["UBI", "MCP_A"], right_on=["UBI", "MCP"], how="left")
+    # ── MCPS_DETECT ───────────────────────────────────────────────────────────
+    MCPS_DETECT = DATA.copy()
+    rename_map = {}
+    if "CO_MCP"  in MCPS_DETECT.columns: rename_map["CO_MCP"]  = "MCP_MANUAL"
+    if "MCP_COD" in MCPS_DETECT.columns: rename_map["MCP_COD"] = "MCP_AUTOM"
+    MCPS_DETECT = MCPS_DETECT.rename(columns=rename_map)
+    if "MCP_MANUAL" in MCPS_DETECT.columns:
+        MCPS_DETECT["MCP_MANUAL"] = MCPS_DETECT["MCP_MANUAL"].replace("", None)
+    if "MCP_AUTOM" in MCPS_DETECT.columns:
+        MCPS_DETECT["MCP_AUTOM"]  = MCPS_DETECT["MCP_AUTOM"].replace("", None)
+    MCPS_DETECT["UBI"] = MCPS_DETECT["UBI"].astype(str).str.strip().apply(
+        lambda x: f"{int(float(x)):06d}" if x not in ("","nan") else x)
+    tiene_manual = "MCP_MANUAL" in MCPS_DETECT.columns and MCPS_DETECT["MCP_MANUAL"].notna().any()
+    tiene_autom  = "MCP_AUTOM"  in MCPS_DETECT.columns and MCPS_DETECT["MCP_AUTOM"].notna().any()
+    if tiene_manual and tiene_autom:
+        MCPS_DETECT["EXACTITUD"] = MCPS_DETECT.apply(clasificar_exactitud, axis=1)
 
-if "MCP_COD" in DATA.columns:
-    DATA["MCP_COD"] = DATA["MCP_COD"].astype(str).str.replace(r"\.0$","",regex=True).apply(
-        lambda x: fmt_int(x, 9) if x not in ("None","nan","") else None)
+    # Guardar en session_state para que los filtros no relancen el motor
+    total = len(MCPS_DETECT)
+    asignados = MCPS_DETECT["CP_A"].notna().sum() if "CP_A" in MCPS_DETECT.columns else 0
+    st.session_state["mcps_detect"]       = MCPS_DETECT
+    st.session_state["mcp_filt"]          = mcp_filt
+    st.session_state["t_total"]           = t_total
+    st.session_state["padron_file_name"]  = padron_file.name
+    st.session_state["resumen_corridas"]  = {
+        "DATA1": len(DATA1), "DATA2": len(DATA2 if not isinstance(DATA2, pd.DataFrame) or not DATA2.empty else pd.DataFrame()),
+        "DATA3_ok": len(DATA3_ok) if not DATA3_ok.empty else 0,
+        "DATA3_nulo": len(DATA3_nulo) if not DATA3_nulo.empty else 0,
+        "total": total, "asignados": asignados,
+    }
+    st.rerun()
 
-t_total = (time.time() - t0) / 60
+# ─────────────────────────────────────────────────────────────────────────────
+# RESULTADOS — se muestran desde session_state, nunca re-ejecutan el motor
+# ─────────────────────────────────────────────────────────────────────────────
+if "mcps_detect" not in st.session_state:
+    st.stop()
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-# MCPS_DETECT — fiel al notebook                                              #
-# ═══════════════════════════════════════════════════════════════════════════ #
+MCPS_DETECT = st.session_state["mcps_detect"]
+mcp_filt    = st.session_state["mcp_filt"]
+t_total     = st.session_state["t_total"]
+resumen     = st.session_state["resumen_corridas"]
+base        = st.session_state.get("padron_file_name","resultado").rsplit(".",1)[0]
 
-MCPS_DETECT = DATA.copy()
-
-rename_map = {}
-if "CO_MCP"  in MCPS_DETECT.columns: rename_map["CO_MCP"]  = "MCP_MANUAL"
-if "MCP_COD" in MCPS_DETECT.columns: rename_map["MCP_COD"] = "MCP_AUTOM"
-MCPS_DETECT = MCPS_DETECT.rename(columns=rename_map)
-
-if "MCP_MANUAL" in MCPS_DETECT.columns:
-    MCPS_DETECT["MCP_MANUAL"] = MCPS_DETECT["MCP_MANUAL"].replace("", None)
-if "MCP_AUTOM"  in MCPS_DETECT.columns:
-    MCPS_DETECT["MCP_AUTOM"]  = MCPS_DETECT["MCP_AUTOM"].replace("", None)
-
-MCPS_DETECT["UBI"] = MCPS_DETECT["UBI"].astype(str).str.strip().apply(
-    lambda x: f"{int(float(x)):06d}" if x not in ("","nan") else x)
-
-tiene_manual = "MCP_MANUAL" in MCPS_DETECT.columns and MCPS_DETECT["MCP_MANUAL"].notna().any()
-tiene_autom  = "MCP_AUTOM"  in MCPS_DETECT.columns and MCPS_DETECT["MCP_AUTOM"].notna().any()
-if tiene_manual and tiene_autom:
-    MCPS_DETECT["EXACTITUD"] = MCPS_DETECT.apply(clasificar_exactitud, axis=1)
-
-# ═══════════════════════════════════════════════════════════════════════════ #
-# RESULTADOS                                                                  #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
-st.markdown("---")
-st.markdown("### 📊 Resultados")
-
-total     = len(MCPS_DETECT)
-asignados = MCPS_DETECT["CP_A"].notna().sum() if "CP_A" in MCPS_DETECT.columns else 0
+total     = resumen["total"]
+asignados = resumen["asignados"]
 sin_asig  = total - asignados
 tasa      = asignados / total * 100 if total else 0
+
+# ── Métricas ──────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown("### 📊 Resultados")
 
 r1,r2,r3,r4,r5 = st.columns(5)
 for col_st, val, lbl in [
@@ -830,16 +834,15 @@ for col_st, val, lbl in [
                     unsafe_allow_html=True)
 
 st.markdown("---")
-rows_c = []
-for nom, df_c in [("🔵 C1 (1–7)",DATA1),("🟢 C2 (11–17)",DATA2),("🟠 C3 (21–32)",DATA3_ok)]:
-    n = len(df_c) if not df_c.empty else 0
-    rows_c.append({"Corrida":nom,"Asignados":f"{n:,}","% del total":f"{n/total*100:.1f}%" if total else "0%"})
-n_nulo = len(DATA3_nulo) if not DATA3_nulo.empty else 0
-rows_c.append({"Corrida":"⚫ Sin asignar","Asignados":f"{n_nulo:,}",
-               "% del total":f"{n_nulo/total*100:.1f}%" if total else "0%"})
+rows_c = [
+    {"Corrida":"🔵 C1 (1–7)",    "Asignados":f"{resumen['DATA1']:,}",    "% del total":f"{resumen['DATA1']/total*100:.1f}%" if total else "0%"},
+    {"Corrida":"🟢 C2 (11–17)",  "Asignados":f"{resumen['DATA2']:,}",    "% del total":f"{resumen['DATA2']/total*100:.1f}%" if total else "0%"},
+    {"Corrida":"🟠 C3 (21–32)",  "Asignados":f"{resumen['DATA3_ok']:,}", "% del total":f"{resumen['DATA3_ok']/total*100:.1f}%" if total else "0%"},
+    {"Corrida":"⚫ Sin asignar",  "Asignados":f"{resumen['DATA3_nulo']:,}","% del total":f"{resumen['DATA3_nulo']/total*100:.1f}%" if total else "0%"},
+]
 st.dataframe(pd.DataFrame(rows_c), use_container_width=True, hide_index=True)
 
-# ── Módulo de validación ──────────────────────────────────────────────────────
+# ── Validación ────────────────────────────────────────────────────────────────
 if "EXACTITUD" in MCPS_DETECT.columns:
     st.markdown("---")
     st.markdown("### 🔍 Módulo de Validación")
@@ -859,51 +862,40 @@ if "EXACTITUD" in MCPS_DETECT.columns:
     st.dataframe(pd.DataFrame(rows_ex), use_container_width=True, hide_index=True)
 
     tab_d, tab_m, tab_met = st.tabs(["📍 Por distrito","🏘️ Por MCP","⚙️ Por método"])
-
     with tab_d:
         rd = (MCPS_DETECT.groupby("UBI").agg(
-            TOTAL=("UBI","count"),
-            MANUAL=("MCP_MANUAL", lambda x: x.notna().sum()),
-            AUTOM=("MCP_AUTOM",   lambda x: x.notna().sum()),
-            CORRECTOS=("EXACTITUD", lambda x: (x=="c").sum())
-        ).reset_index())
+            TOTAL=("UBI","count"), MANUAL=("MCP_MANUAL",lambda x: x.notna().sum()),
+            AUTOM=("MCP_AUTOM",lambda x: x.notna().sum()),
+            CORRECTOS=("EXACTITUD",lambda x: (x=="c").sum())).reset_index())
         rd["DETECTADO"]      = (rd["CORRECTOS"]/rd["MANUAL"]*100).round(2)
         rd["CORRETAMENTE_D"] = (rd["CORRECTOS"]/rd["AUTOM"]*100).round(2)
         st.dataframe(rd, use_container_width=True, hide_index=True)
         st.download_button("📥 RES_DIST.xlsx", data=to_excel_bytes(rd), file_name="RES_DIST.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
     with tab_m:
         rm = (MCPS_DETECT.groupby("MCP_MANUAL").agg(
-            TOTAL=("MCP_MANUAL","count"),
-            MANUAL=("MCP_MANUAL", lambda x: x.notna().sum()),
-            AUTOM=("MCP_AUTOM",   lambda x: x.notna().sum()),
-            CORRECTOS=("EXACTITUD", lambda x: (x=="c").sum())
-        ).reset_index())
+            TOTAL=("MCP_MANUAL","count"), MANUAL=("MCP_MANUAL",lambda x: x.notna().sum()),
+            AUTOM=("MCP_AUTOM",lambda x: x.notna().sum()),
+            CORRECTOS=("EXACTITUD",lambda x: (x=="c").sum())).reset_index())
         rm["DETECTADO"]      = (rm["CORRECTOS"]/rm["MANUAL"]*100).round(2)
         rm["CORRETAMENTE_D"] = (rm["CORRECTOS"]/rm["AUTOM"]*100).round(2)
         st.dataframe(rm, use_container_width=True, hide_index=True)
         st.download_button("📥 RES_MCP.xlsx", data=to_excel_bytes(rm), file_name="RES_MCP.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
     with tab_met:
         if "metodo_CP" in MCPS_DETECT.columns:
             rmet = (MCPS_DETECT.groupby(["metodo_CP","EXACTITUD"]).size()
-                    .reset_index(name="n")
-                    .pivot(index="metodo_CP", columns="EXACTITUD", values="n")
+                    .reset_index(name="n").pivot(index="metodo_CP",columns="EXACTITUD",values="n")
                     .fillna(0).reset_index())
             rmet.columns.name = None
             st.dataframe(rmet, use_container_width=True, hide_index=True)
             st.download_button("📥 RES_METODO.xlsx", data=to_excel_bytes(rmet), file_name="RES_METODO.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-# EXPLORADOR MCPS_DETECT — todas las columnas, filtro por columna            #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
+# ── Explorador MCPS_DETECT ────────────────────────────────────────────────────
 st.markdown("---")
 st.markdown("### 🔎 Explorador MCPS_DETECT")
-st.caption("Resultado completo — todas las columnas. Filtra por cualquier columna.")
+st.caption("Todas las columnas. Los filtros no vuelven a ejecutar el motor.")
 
 mcps_cols = MCPS_DETECT.columns.tolist()
 ef1, ef2, ef3 = st.columns([2, 3, 2])
@@ -923,13 +915,10 @@ if estado_det == "Sin asignar" and "CP_A" in dv.columns: dv = dv[dv["CP_A"].isna
 st.caption(f"Mostrando **{len(dv):,}** de **{total:,}** registros · {len(mcps_cols)} columnas")
 st.dataframe(dv.reset_index(drop=True), use_container_width=True, height=480)
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-# EXPLORADOR CATÁLOGO MCP — todas las columnas, filtro por columna           #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
+# ── Explorador Catálogo MCP ───────────────────────────────────────────────────
 st.markdown("---")
 st.markdown("### 🗂️ Explorador Catálogo MCP")
-st.caption("Catálogo MCP_ORIGINAL.xlsx cargado. Útil para cruzar y auditar resultados.")
+st.caption("Catálogo MCP_ORIGINAL.xlsx. Útil para auditar coincidencias.")
 
 mcp_cols_all = mcp_filt.columns.tolist()
 mf1, mf2 = st.columns([2, 3])
@@ -943,49 +932,38 @@ if mcp_filtro_col != "(sin filtro)" and mcp_filtro_val.strip():
     mv = mv[mv[mcp_filtro_col].astype(str).str.upper().str.contains(
         mcp_filtro_val.strip().upper(), na=False)]
 
-st.caption(f"Mostrando **{len(mv):,}** de **{len(mcp_filt):,}** entradas MCP · {len(mcp_cols_all)} columnas")
+st.caption(f"Mostrando **{len(mv):,}** de **{len(mcp_filt):,}** entradas · {len(mcp_cols_all)} columnas")
 st.dataframe(mv.reset_index(drop=True), use_container_width=True, height=400)
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-# DESCARGAS                                                                   #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
+# ── Descargas ─────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.markdown("### ⬇️ Descargar")
 
-base = padron_file.name.rsplit(".", 1)[0]
 d1, d2, d3, d4 = st.columns(4)
-
 with d1:
-    st.download_button(
-        "📥 MCPS_DETECT completo (.xlsx)",
-        data=to_excel_bytes(MCPS_DETECT),
-        file_name=f"MCPS_DETECT_{base}.xlsx",
+    st.download_button("📥 MCPS_DETECT completo (.xlsx)",
+        data=to_excel_bytes(MCPS_DETECT), file_name=f"MCPS_DETECT_{base}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True)
 with d2:
     df_nulos = MCPS_DETECT[MCPS_DETECT["CP_A"].isna()] if "CP_A" in MCPS_DETECT.columns else pd.DataFrame()
     if not df_nulos.empty:
-        st.download_button(
-            "📥 Sin asignar (.xlsx)",
-            data=to_excel_bytes(df_nulos),
-            file_name=f"SIN_ASIGNAR_{base}.xlsx",
+        st.download_button("📥 Sin asignar (.xlsx)",
+            data=to_excel_bytes(df_nulos), file_name=f"SIN_ASIGNAR_{base}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True)
     else:
         st.success("🎉 ¡Todos los registros fueron asignados!")
 with d3:
     if not dv.empty:
-        st.download_button(
-            "📥 Vista filtrada MCPS_DETECT (.xlsx)",
+        st.download_button("📥 Vista filtrada MCPS_DETECT (.xlsx)",
             data=to_excel_bytes(dv.reset_index(drop=True)),
             file_name=f"FILTRADO_DETECT_{base}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True)
 with d4:
     if not mv.empty:
-        st.download_button(
-            "📥 Vista filtrada MCP (.xlsx)",
+        st.download_button("📥 Vista filtrada MCP (.xlsx)",
             data=to_excel_bytes(mv.reset_index(drop=True)),
             file_name=f"FILTRADO_MCP_{base}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
